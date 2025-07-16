@@ -1,0 +1,64 @@
+#pragma once
+#include <atomic>
+#include <memory>
+
+template<typename T>
+class SPSCQueue {
+private:
+    struct Node {
+        std::atomic<T*> data{nullptr};
+        std::atomic<Node*> next{nullptr};
+    };
+    
+    std::atomic<Node*> head_;  // producer writes
+    std::atomic<Node*> tail_;  // consumer writes
+    
+public:
+    SPSCQueue() {
+        Node* dummy = new Node;
+        head_.store(dummy, std::memory_order_relaxed);
+        tail_.store(dummy, std::memory_order_relaxed);
+    }
+    
+    ~SPSCQueue() {
+        while (Node* old_head = head_.load()) {
+            head_.store(old_head->next);
+            delete old_head;
+        }
+    }
+    
+    void enqueue(T item) {
+        Node* new_node = new Node;
+        T* data = new T(std::move(item));
+        
+        Node* prev_head = head_.load(std::memory_order_relaxed);
+        prev_head->data.store(data, std::memory_order_relaxed);
+        prev_head->next.store(new_node, std::memory_order_release);
+        head_.store(new_node, std::memory_order_relaxed);
+    }
+    
+    bool dequeue(T& result) {
+        Node* tail = tail_.load(std::memory_order_relaxed);
+        Node* next = tail->next.load(std::memory_order_acquire);
+        
+        if (next == nullptr) {
+            return false;  // empty
+        }
+        
+        T* data = next->data.load(std::memory_order_relaxed);
+        if (data == nullptr) {
+            return false;  // empty
+        }
+        
+        result = *data;
+        delete data;
+        tail_.store(next, std::memory_order_release);
+        delete tail;
+        return true;
+    }
+    
+    bool empty() const {
+        Node* tail = tail_.load(std::memory_order_acquire);
+        return tail->next.load(std::memory_order_acquire) == nullptr;
+    }
+};
