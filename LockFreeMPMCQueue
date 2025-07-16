@@ -1,0 +1,118 @@
+
+#pragma once
+#include <atomic>
+#include <memory>
+
+template<typename T>
+class MPMCQueue {
+private:
+    struct Node {
+        std::atomic<T*> data{nullptr};
+        std::atomic<Node*> next{nullptr};
+        
+        Node() = default;
+        ~Node() {
+            T* d = data.load();
+            if (d) delete d;
+        }
+    };
+    
+    std::atomic<Node*> head_;
+    std::atomic<Node*> tail_;
+    
+public:
+    MPMCQueue() {
+        Node* dummy = new Node;
+        head_.store(dummy, std::memory_order_relaxed);
+        tail_.store(dummy, std::memory_order_relaxed);
+    }
+    
+    ~MPMCQueue() {
+        while (Node* old_head = head_.load()) {
+            head_.store(old_head->next);
+            delete old_head;
+        }
+    }
+    
+    void enqueue(T item) {
+        Node* new_node = new Node;
+        T* data = new T(std::move(item));
+        
+        for (;;) {
+            Node* last = tail_.load(std::memory_order_acquire);
+            Node* next = last->next.load(std::memory_order_acquire);
+            
+            // Check if tail is still the same
+            if (last == tail_.load(std::memory_order_acquire)) {
+                if (next == nullptr) {
+                    // Try to link new node at end of list
+                    if (last->next.compare_exchange_weak(next, new_node, 
+                                                        std::memory_order_release,
+                                                        std::memory_order_relaxed)) {
+                        // Successfully linked, now set data
+                        last->data.store(data, std::memory_order_release);
+                        break;
+                    }
+                } else {
+                    // Help advance tail
+                    tail_.compare_exchange_weak(last, next, 
+                                               std::memory_order_release,
+                                               std::memory_order_relaxed);
+                }
+            }
+        }
+        
+        // Try to advance tail
+        tail_.compare_exchange_weak(head_.load(), new_node, 
+                                   std::memory_order_release,
+                                   std::memory_order_relaxed);
+    }
+    
+    bool dequeue(T& result) {
+        for (;;) {
+            Node* first = head_.load(std::memory_order_acquire);
+            Node* last = tail_.load(std::memory_order_acquire);
+            Node* next = first->next.load(std::memory_order_acquire);
+            
+            // Check if head is still the same
+            if (first == head_.load(std::memory_order_acquire)) {
+                if (first == last) {
+                    if (next == nullptr) {
+                        // Queue is empty
+                        return false;
+                    }
+                    // Help advance tail
+                    tail_.compare_exchange_weak(last, next, 
+                                               std::memory_order_release,
+                                               std::memory_order_relaxed);
+                } else {
+                    if (next == nullptr) {
+                        continue;  // Inconsistent state, retry
+                    }
+                    
+                    // Read data before trying to swing head
+                    T* data = next->data.load(std::memory_order_acquire);
+                    if (data == nullptr) {
+                        continue;  // Data not ready yet
+                    }
+                    
+                    // Try to swing head to next node
+                    if (head_.compare_exchange_weak(first, next, 
+                                                   std::memory_order_release,
+                                                   std::memory_order_relaxed)) {
+                        result = *data;
+                        delete data;
+                        delete first;  // Note: This is unsafe without hazard pointers
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    
+    bool empty() const {
+        Node* first = head_.load(std::memory_order_acquire);
+        Node* last = tail_.load(std::memory_order_acquire);
+        return (first == last) && (first->next.load(std::memory_order_acquire) == nullptr);
+    }
+};
