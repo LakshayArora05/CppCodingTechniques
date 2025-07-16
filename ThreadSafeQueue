@@ -1,0 +1,61 @@
+#pragma once
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <optional>
+
+template<typename T>
+class ThreadSafeQueue {
+private:
+    std::queue<T> queue_;
+    mutable std::mutex mutex_;
+    std::condition_variable condition_;
+    
+public:
+    void enqueue(T item) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        queue_.push(std::move(item));
+        condition_.notify_one();
+    }
+    
+    bool dequeue(T& item) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (queue_.empty()) {
+            return false;
+        }
+        item = std::move(queue_.front());
+        queue_.pop();
+        return true;
+    }
+    
+    // Blocking dequeue - waits until item available
+    T wait_dequeue() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        condition_.wait(lock, [this] { return !queue_.empty(); });
+        T item = std::move(queue_.front());
+        queue_.pop();
+        return item;
+    }
+    
+    // Timeout dequeue
+    template<typename Rep, typename Period>
+    std::optional<T> wait_dequeue_for(const std::chrono::duration<Rep, Period>& timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (condition_.wait_for(lock, timeout, [this] { return !queue_.empty(); })) {
+            T item = std::move(queue_.front());
+            queue_.pop();
+            return item;
+        }
+        return std::nullopt;
+    }
+    
+    bool empty() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.empty();
+    }
+    
+    size_t size() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.size();
+    }
+};
